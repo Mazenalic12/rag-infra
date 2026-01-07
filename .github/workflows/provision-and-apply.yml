@@ -1,0 +1,197 @@
+name: Provision AWS (Terraform) + Install ALB + Apply K8s (One Click)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+env:
+  AWS_REGION: eu-central-1
+  EKS_CLUSTER_NAME: rag-cluster  
+  K8S_NAMESPACE: rag
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- AWS creds ---
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      # --- Tools ---
+      - name: Install tooling (terraform, kubectl, helm, eksctl)
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y unzip jq
+
+          # Terraform
+          curl -fsSL https://releases.hashicorp.com/terraform/1.9.5/terraform_1.9.5_linux_amd64.zip -o tf.zip
+          unzip -o tf.zip
+          sudo mv terraform /usr/local/bin/terraform
+          terraform -version
+
+          # kubectl
+          curl -fsSL -o kubectl https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+          # helm
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm version
+
+          # eksctl
+          curl -sL "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz" | tar xz -C /tmp
+          sudo mv /tmp/eksctl /usr/local/bin/eksctl
+          eksctl version
+
+      # --- Terraform VPC ---
+      - name: Terraform Apply (VPC)
+        working-directory: infrastructure/terraform/vpc
+        run: |
+          set -e
+          terraform init
+          terraform apply -auto-approve
+
+      # --- Terraform EKS ---
+      - name: Terraform Apply (EKS)
+        working-directory: infrastructure/terraform/eks
+        run: |
+          set -e
+          terraform init
+          terraform apply -auto-approve
+
+      # --- kubeconfig from EKS (no KUBE_CONFIG_DATA) ---
+      - name: Create kubeconfig from EKS
+        run: |
+          set -e
+          aws eks update-kubeconfig --region "${AWS_REGION}" --name "${EKS_CLUSTER_NAME}"
+          kubectl cluster-info
+
+      # --- Ensure Fargate Pod Execution Role exists ---
+      - name: Ensure Fargate Pod Execution Role
+        id: fargate_role
+        run: |
+          set -e
+          ROLE_NAME="EKSFargatePodExecutionRole"
+
+          if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+            echo "Role exists."
+          else
+            cat > trust.json <<'EOF'
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": { "Service": "eks-fargate-pods.amazonaws.com" },
+                "Action": "sts:AssumeRole"
+              }
+            ]
+          }
+          EOF
+            aws iam create-role --role-name "$ROLE_NAME" --assume-role-policy-document file://trust.json
+            aws iam attach-role-policy --role-name "$ROLE_NAME" --policy-arn arn:aws:iam::aws:policy/AmazonEKSFargatePodExecutionRolePolicy
+          fi
+
+          ARN=$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text)
+          echo "POD_EXEC_ROLE_ARN=$ARN" >> $GITHUB_OUTPUT
+
+      # --- Create/Ensure Fargate Profiles (rag + controller) ---
+      - name: Ensure Fargate profiles (rag + lbc)
+        env:
+          POD_EXEC_ROLE_ARN: ${{ steps.fargate_role.outputs.POD_EXEC_ROLE_ARN }}
+        run: |
+          set -e
+
+          # rag namespace
+          if aws eks describe-fargate-profile --region "$AWS_REGION" --cluster-name "$EKS_CLUSTER_NAME" --fargate-profile-name rag >/dev/null 2>&1; then
+            echo "Fargate profile rag exists."
+          else
+            aws eks create-fargate-profile \
+              --region "$AWS_REGION" \
+              --cluster-name "$EKS_CLUSTER_NAME" \
+              --fargate-profile-name rag \
+              --pod-execution-role-arn "$POD_EXEC_ROLE_ARN" \
+              --selectors '[{"namespace":"rag"}]'
+          fi
+
+          # AWS Load Balancer Controller in kube-system (label selector)
+          if aws eks describe-fargate-profile --region "$AWS_REGION" --cluster-name "$EKS_CLUSTER_NAME" --fargate-profile-name lbc >/dev/null 2>&1; then
+            echo "Fargate profile lbc exists."
+          else
+            aws eks create-fargate-profile \
+              --region "$AWS_REGION" \
+              --cluster-name "$EKS_CLUSTER_NAME" \
+              --fargate-profile-name lbc \
+              --pod-execution-role-arn "$POD_EXEC_ROLE_ARN" \
+              --selectors '[{"namespace":"kube-system","labels":{"app.kubernetes.io/name":"aws-load-balancer-controller"}}]'
+          fi
+
+      # --- Install AWS Load Balancer Controller (IRSA + Helm) ---
+      - name: Install AWS Load Balancer Controller
+        run: |
+          set -e
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          VPC_ID=$(aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.resourcesVpcConfig.vpcId' --output text)
+
+          # OIDC provider (required for IRSA)
+          eksctl utils associate-iam-oidc-provider --cluster "$EKS_CLUSTER_NAME" --region "$AWS_REGION" --approve
+
+          # IAM policy for controller (create if not exists)
+          POLICY_NAME="AWSLoadBalancerControllerIAMPolicy"
+          POLICY_ARN="arn:aws:iam::$AWS_ACCOUNT_ID:policy/$POLICY_NAME"
+
+          if aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
+            echo "Policy exists."
+          else
+            curl -fsSL -o iam_policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.14.1/docs/install/iam_policy.json
+            aws iam create-policy --policy-name "$POLICY_NAME" --policy-document file://iam_policy.json
+          fi
+
+          # Create IAM service account (idempotent with override)
+          eksctl create iamserviceaccount \
+            --cluster="$EKS_CLUSTER_NAME" \
+            --namespace=kube-system \
+            --name=aws-load-balancer-controller \
+            --attach-policy-arn="$POLICY_ARN" \
+            --override-existing-serviceaccounts \
+            --region "$AWS_REGION" \
+            --approve
+
+          # Install chart
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update eks
+
+          # Install/upgrade
+          helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+            -n kube-system \
+            --set clusterName="$EKS_CLUSTER_NAME" \
+            --set serviceAccount.create=false \
+            --set serviceAccount.name=aws-load-balancer-controller \
+            --set region="$AWS_REGION" \
+            --set vpcId="$VPC_ID"
+
+          kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=300s
+
+      # --- Apply your K8s manifests ---
+      - name: Apply K8s manifests (namespace + app)
+        run: |
+          set -e
+          kubectl apply -f infrastructure/k8s/namespace.yaml
+          kubectl apply -n "${K8S_NAMESPACE}" -f infrastructure/k8s/
+          kubectl -n "${K8S_NAMESPACE}" get pods,svc,ingress -o wide
