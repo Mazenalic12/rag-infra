@@ -2,6 +2,11 @@ name: Provision AWS (Terraform) + Install ALB + Apply K8s (One Click)
 
 on:
   workflow_dispatch:
+      inputs:
+      skip_terraform:
+        description: "Skip Terraform and only run cluster add-ons + kubectl apply"
+        required: true
+        default: "true"
   push:
     branches: ["main"]
 
@@ -61,6 +66,7 @@ jobs:
 
       # --- Terraform VPC ---
       - name: Terraform Apply (VPC)
+        if: ${{ github.event_name == 'push' || github.event.inputs.skip_terraform != 'true' }}
         working-directory: infrastructure/terraform/vpc
         run: |
           set -e
@@ -70,6 +76,7 @@ jobs:
       # --- Terraform EKS ---
       - name: Terraform Apply (EKS)
         working-directory: infrastructure/terraform/eks
+        if: ${{ github.event_name == 'push' || github.event.inputs.skip_terraform != 'true' }}
         run: |
           set -e
           terraform init
