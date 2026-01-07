@@ -66,4 +66,6 @@ output "ecr_repository_arn" {
 variable "cluster_name" {
   type        = string
   description = "EKS cluster name used for subnet tagging"
+  default     = "rag-eks"  # <-- zet hier jouw echte EKS clusternaam
 }
+
