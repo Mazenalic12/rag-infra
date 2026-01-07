@@ -1,0 +1,50 @@
+name: Apply K8s Only (no build)
+
+on:
+  push:
+    branches: ["main"]
+
+env:
+  AWS_REGION: eu-central-1
+  K8S_NAMESPACE: rag
+  K8S_DIR: infrastructure/k8s
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.0
+
+      - name: Configure kubeconfig
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+        run: |
+          set -e
+          mkdir -p $HOME/.kube
+          echo "$KUBE_CONFIG_DATA" | base64 --decode > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+          kubectl cluster-info
+
+      - name: Apply namespace + manifests
+        run: |
+          set -e
+          kubectl apply -f "${{ env.K8S_DIR }}/namespace.yaml"
+          kubectl apply -n "${{ env.K8S_NAMESPACE }}" -f "${{ env.K8S_DIR }}"
+          kubectl -n "${{ env.K8S_NAMESPACE }}" get svc,ingress -o wide
