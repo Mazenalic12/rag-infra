@@ -4,8 +4,9 @@ metadata:
   name: rag-query-svc
   namespace: rag
 spec:
-  type: NodePort
-  selector: { app: rag-query }
+  type: ClusterIP
+  selector:
+    app: rag-query
   ports:
     - port: 80
       targetPort: 8080
