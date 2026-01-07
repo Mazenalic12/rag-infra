@@ -71,8 +71,8 @@ jobs:
         run: |
           set -e
           terraform init
-          terraform apply -auto-approve
-
+          terraform apply -auto-approve -var="cluster_name=${EKS_CLUSTER_NAME}"
+          
       # --- Terraform EKS ---
       - name: Terraform Apply (EKS)
         working-directory: infrastructure/terraform/eks
