@@ -1,4 +1,4 @@
-name: Apply K8s Only (no build)
+name: Apply K8s Only (EKS kubeconfig via AWS)
 
 on:
   push:
@@ -6,13 +6,13 @@ on:
 
 env:
   AWS_REGION: eu-central-1
+  EKS_CLUSTER_NAME: <JOUW_CLUSTER_NAAM>
   K8S_NAMESPACE: rag
   K8S_DIR: infrastructure/k8s
 
 jobs:
   apply:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,7 +24,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Verify AWS credentials
+      - name: Verify AWS identity
         run: aws sts get-caller-identity
 
       - name: Install kubectl
@@ -32,19 +32,19 @@ jobs:
         with:
           version: v1.30.0
 
-      - name: Configure kubeconfig
-        env:
-          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+      - name: Install AWS CLI
         run: |
-          set -e
-          mkdir -p $HOME/.kube
-          echo "$KUBE_CONFIG_DATA" | base64 --decode > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
+          sudo apt-get update
+          sudo apt-get install -y awscli
+
+      - name: Create kubeconfig from EKS
+        run: |
+          aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
           kubectl cluster-info
 
-      - name: Apply namespace + manifests
+      - name: Apply manifests
         run: |
           set -e
           kubectl apply -f "${{ env.K8S_DIR }}/namespace.yaml"
           kubectl apply -n "${{ env.K8S_NAMESPACE }}" -f "${{ env.K8S_DIR }}"
-          kubectl -n "${{ env.K8S_NAMESPACE }}" get svc,ingress -o wide
+          kubectl -n "${{ env.K8S
