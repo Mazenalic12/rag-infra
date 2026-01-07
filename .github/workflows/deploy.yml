@@ -1,42 +1,150 @@
-name: CI/CD Pipeline
+name: Build -> Deploy to EKS (Frankfurt) - RAG Stack
+
 on:
   push:
-    branches: [ main ]
+    branches: ["main"]
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: eu-central-1
+  K8S_NAMESPACE: rag
+  K8S_DIR: infrastructure/k8s
+
+  # waar je teammate-zip code naartoe kopieert
+  APP_PATH: services/rag-service
+
+  # ECR repo namen
+  ECR_REPO_API: rag-api
+  ECR_REPO_WORKER: rag-worker
+  ECR_REPO_FRONTEND: rag-frontend
+
+  # S3 bucket (moet lowercase)
+  S3_BUCKET_NAME: rag-documents
 
 jobs:
-  build-test-deploy:
+  deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Login to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Build image
-        run: |
-          IMAGE=ghcr.io/${{ github.repository }}/rag-service:latest
-          docker build -t $IMAGE .
-          docker push $IMAGE
-
-      - name: Configure AWS creds
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: eu-central-1
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Update kubeconfig (EKS)
-        run: aws eks update-kubeconfig --name rag-cluster --region eu-central-1
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Deploy to Kubernetes
+      - name: Compute image tag
+        id: vars
         run: |
-          kubectl apply -f infrastructure/k8s/namespace.yaml
-          kubectl apply -f infrastructure/k8s/deployment.yaml
-          kubectl apply -f infrastructure/k8s/service.yaml
-          kubectl apply -f infrastructure/k8s/ingress.yamly
-          
+          echo "TAG=${GITHUB_SHA}" >> $GITHUB_OUTPUT
+          echo "REGISTRY=${{ steps.ecr.outputs.registry }}" >> $GITHUB_OUTPUT
+
+      - name: Ensure ECR repos exist (optional)
+        run: |
+          set -e
+          for repo in "${ECR_REPO_API}" "${ECR_REPO_WORKER}" "${ECR_REPO_FRONTEND}"; do
+            aws ecr describe-repositories --repository-names "$repo" >/dev/null 2>&1 \
+              || aws ecr create-repository --repository-name "$repo" >/dev/null
+          done
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push API
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.APP_PATH }}
+          file: ${{ env.APP_PATH }}/Dockerfile.api
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO_API }}:${{ steps.vars.outputs.TAG }}
+            ${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO_API }}:latest
+
+      - name: Build & push Worker
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.APP_PATH }}
+          file: ${{ env.APP_PATH }}/Dockerfile.worker
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO_WORKER }}:${{ steps.vars.outputs.TAG }}
+            ${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO_WORKER }}:latest
+
+      - name: Build & push Frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.APP_PATH }}
+          file: ${{ env.APP_PATH }}/Dockerfile.frontend
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO_FRONTEND }}:${{ steps.vars.outputs.TAG }}
+            ${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO_FRONTEND }}:latest
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.0
+
+      - name: Configure kubeconfig
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+        run: |
+          set -e
+          mkdir -p $HOME/.kube
+          echo "$KUBE_CONFIG_DATA" | base64 --decode > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+          kubectl cluster-info
+
+      - name: Apply namespace
+        run: |
+          set -e
+          kubectl apply -f "${{ env.K8S_DIR }}/namespace.yaml"
+
+      - name: Upsert secrets (Cohere + AWS + bucket)
+        env:
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          set -e
+          kubectl -n "${{ env.K8S_NAMESPACE }}" create secret generic rag-secrets \
+            --from-literal=COHERE_API_KEY="$COHERE_API_KEY" \
+            --from-literal=AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+            --from-literal=AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+            --from-literal=AWS_DEFAULT_REGION="${{ env.AWS_REGION }}" \
+            --from-literal=S3_BUCKET_NAME="${{ env.S3_BUCKET_NAME }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply stack (weaviate + api + worker + frontend + ingress)
+        run: |
+          set -e
+          kubectl apply -n "${{ env.K8S_NAMESPACE }}" -f "${{ env.K8S_DIR }}/stack.yaml"
+
+      - name: Rollout new images
+        run: |
+          set -e
+          API_IMAGE="${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO_API }}:${{ steps.vars.outputs.TAG }}"
+          WORKER_IMAGE="${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO_WORKER }}:${{ steps.vars.outputs.TAG }}"
+          FRONTEND_IMAGE="${{ steps.vars.outputs.REGISTRY }}/${{ env.ECR_REPO_FRONTEND }}:${{ steps.vars.outputs.TAG }}"
+
+          kubectl -n "${{ env.K8S_NAMESPACE }}" set image deployment/rag-api rag-api=$API_IMAGE
+          kubectl -n "${{ env.K8S_NAMESPACE }}" set image deployment/rag-worker rag-worker=$WORKER_IMAGE
+          kubectl -n "${{ env.K8S_NAMESPACE }}" set image deployment/rag-frontend rag-frontend=$FRONTEND_IMAGE
+
+          kubectl -n "${{ env.K8S_NAMESPACE }}" rollout status deployment/rag-api --timeout=300s
+          kubectl -n "${{ env.K8S_NAMESPACE }}" rollout status deployment/rag-worker --timeout=300s
+          kubectl -n "${{ env.K8S_NAMESPACE }}" rollout status deployment/rag-frontend --timeout=300s
+
+      - name: Show resources
+        run: |
+          kubectl -n "${{ env.K8S_NAMESPACE }}" get deploy,svc,ingress -o wide
