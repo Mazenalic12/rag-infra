@@ -9,3 +9,8 @@ awscliv2.zip
 .terraform/
 *.tfstate
 *.tfstate.*
+
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform.lock.hcl
