@@ -1,0 +1,113 @@
+name: Terraform Destroy (EKS + VPC)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type DESTROY to confirm"
+        required: true
+        default: ""
+
+env:
+  AWS_REGION: eu-central-1
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+  # remote state (zelfde als apply)
+  TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+  TF_LOCK_TABLE: ${{ secrets.TF_LOCK_TABLE }}
+
+  # jouw clusternaam (zoals je gebruikte)
+  EKS_CLUSTER_NAME: rag-cluster
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Safety check
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "DESTROY" ]; then
+            echo "Refusing to run. You must type DESTROY in the workflow input."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.5"
+
+      - name: Ensure backend secrets exist
+        run: |
+          set -e
+          if [ -z "${TF_STATE_BUCKET}" ] || [ -z "${TF_LOCK_TABLE}" ]; then
+            echo "ERROR: Missing TF_STATE_BUCKET or TF_LOCK_TABLE secrets."
+            exit 1
+          fi
+
+      # --- Delete Fargate profiles first (otherwise EKS delete fails) ---
+      - name: Delete EKS Fargate profiles (if cluster exists)
+        run: |
+          set -e
+          if aws eks describe-cluster --region "${AWS_REGION}" --name "${EKS_CLUSTER_NAME}" >/dev/null 2>&1; then
+            echo "Cluster exists, deleting fargate profiles..."
+            for p in $(aws eks list-fargate-profiles --region "${AWS_REGION}" --cluster-name "${EKS_CLUSTER_NAME}" --query 'fargateProfileNames[]' --output text); do
+              echo "Deleting fargate profile: $p"
+              aws eks delete-fargate-profile --region "${AWS_REGION}" --cluster-name "${EKS_CLUSTER_NAME}" --fargate-profile-name "$p" || true
+            done
+
+            echo "Waiting until fargate profiles are gone..."
+            for i in $(seq 1 60); do
+              N=$(aws eks list-fargate-profiles --region "${AWS_REGION}" --cluster-name "${EKS_CLUSTER_NAME}" --query 'length(fargateProfileNames)' --output text)
+              if [ "$N" = "0" ]; then
+                echo "All fargate profiles deleted."
+                break
+              fi
+              echo "Still $N profiles... waiting"
+              sleep 10
+            done
+          else
+            echo "Cluster does not exist; skipping fargate profile deletion."
+          fi
+
+      # --- Destroy EKS first ---
+      - name: Terraform Init (EKS)
+        working-directory: infrastructure/terraform/eks
+        run: |
+          set -e
+          terraform init \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=eks/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${TF_LOCK_TABLE}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform Destroy (EKS)
+        working-directory: infrastructure/terraform/eks
+        run: terraform destroy -auto-approve
+
+      # --- Destroy VPC second ---
+      - name: Terraform Init (VPC)
+        working-directory: infrastructure/terraform/vpc
+        run: |
+          set -e
+          terraform init \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=vpc/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${TF_LOCK_TABLE}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform Destroy (VPC)
+        working-directory: infrastructure/terraform/vpc
+        run: terraform destroy -auto-approve
