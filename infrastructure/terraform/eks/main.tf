@@ -15,12 +15,13 @@ provider "aws" {
   region = var.region
 }
 
-# VPC state uit ../vpc (bestaat nu, want je hebt net apply gedaan)
+# VPC state uit ../vpc 
 data "terraform_remote_state" "vpc" {
-  backend = "local"
-
+  backend = "s3"
   config = {
-    path = "../vpc/terraform.tfstate"
+    bucket = "JOUW_TF_STATE_BUCKET"
+    key    = "rag/vpc/terraform.tfstate"
+    region = var.region
   }
 }
 
