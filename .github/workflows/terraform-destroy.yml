@@ -80,7 +80,7 @@ jobs:
           echo "Using EKS key: ${{ github.event.inputs.eks_state_key }}"
 
       # -------------------------
-      # EKS: check state (optional)
+      # EKS: check state 
       # -------------------------
       - name: Check EKS state exists (set output)
         id: eks_state
