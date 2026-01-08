@@ -3,13 +3,13 @@ terraform {
 
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
+      source = "hashicorp/aws"
       # Belangrijk: alleen provider 5.x gebruiken (6.x gaf die elastic_* errors)
       version = ">= 5.0.0, < 6.0.0"
-      
+
     }
   }
-backend "s3" {}
+  backend "s3" {}
 }
 
 provider "aws" {
@@ -36,21 +36,21 @@ module "eks" {
   vpc_id     = data.terraform_remote_state.vpc.outputs.vpc_id
   subnet_ids = data.terraform_remote_state.vpc.outputs.private_app_subnets
 
-create_kms_key = false
-cluster_encryption_config  = []
+  create_kms_key            = false
+  cluster_encryption_config = []
 
-create_cloudwatch_log_group = false
-cluster_enabled_log_types   = []
+  create_cloudwatch_log_group = false
+  cluster_enabled_log_types   = []
 
 
 
-cluster_endpoint_public_access          = true
-cluster_endpoint_private_access         = true
-cluster_endpoint_public_access_cidrs    = ["0.0.0.0/0"]
+  cluster_endpoint_public_access       = true
+  cluster_endpoint_private_access      = true
+  cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]
 
-enable_cluster_creator_admin_permissions = true
+  enable_cluster_creator_admin_permissions = true
 
-eks_managed_node_groups = {}
+  eks_managed_node_groups = {}
 
 
   fargate_profiles = {
