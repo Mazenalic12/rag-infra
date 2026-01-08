@@ -171,7 +171,17 @@ jobs:
             echo "VPC: plan faalde"
             exit 1
           fi
-
+          
+      - name: Verify VPC state exists in S3
+        shell: bash
+        run: |
+          set -e
+          BUCKET="${{ secrets.TF_STATE_BUCKET }}"
+          KEY="${{ env.VPC_STATE_KEY }}"
+          echo "Checking: s3://$BUCKET/$KEY"
+          aws s3api head-object --bucket "$BUCKET" --key "$KEY" >/dev/null
+          echo "✅ VPC state found."
+        
       - name: Apply EKS (skip als geen changes)
         working-directory: infrastructure/terraform/eks
         shell: bash
