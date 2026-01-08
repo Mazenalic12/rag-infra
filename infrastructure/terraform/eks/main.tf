@@ -6,6 +6,7 @@ terraform {
       source  = "hashicorp/aws"
       # Belangrijk: alleen provider 5.x gebruiken (6.x gaf die elastic_* errors)
       version = ">= 5.0.0, < 6.0.0"
+      backend "s3" {}
     }
   }
 }
