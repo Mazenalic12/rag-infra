@@ -4,7 +4,7 @@ terraform {
   required_providers {
     aws = {
       source = "hashicorp/aws"
-      # GEEN version hier -> module kiest zelf
+      backend "s3" {}
     }
   }
 }
