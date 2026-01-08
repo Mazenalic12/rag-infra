@@ -28,7 +28,7 @@ module "eks" {
   version = "20.24.0"
 
   cluster_name    = var.cluster_name
-  cluster_version = "1.34"
+  cluster_version = "1.29"
 
   vpc_id     = data.terraform_remote_state.vpc.outputs.vpc_id
   subnet_ids = data.terraform_remote_state.vpc.outputs.private_app_subnets
