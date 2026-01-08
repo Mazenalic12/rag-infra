@@ -34,7 +34,6 @@ env:
   TF_VAR_vpc_state_key: ${{ env.VPC_STATE_KEY }}
 
 
-
 jobs:
   plan:
     name: Plan (PR)
