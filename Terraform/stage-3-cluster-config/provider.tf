@@ -7,7 +7,7 @@ data "terraform_remote_state" "eks" {
 
 provider "aws" {
   region  = var.region
-  profile = "proftaak_account"
+  
 }
 
 provider "kubernetes" {
@@ -23,8 +23,7 @@ provider "kubernetes" {
       "get-token",
       "--cluster-name",
       var.cluster_name,
-      "--profile",
-      "proftaak_account"
+      
     ]
   }
 }
